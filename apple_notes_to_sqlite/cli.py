@@ -83,6 +83,7 @@ def cli(db_path, stop_after, dump, schema):
     # Use click progressbar
     i = 0
     if dump:
+        click.echo("Fetching notes from Notes…", err=True)
         for note in extract_notes():
             click.echo(json.dumps(note))
             i += 1
@@ -121,6 +122,7 @@ def cli(db_path, stop_after, dump, schema):
             # Our work is done
             return
 
+        click.echo("Fetching folders from Notes…", err=True)
         for folder in topological_sort(extract_folders()):
             folder["parent"] = folder_long_ids_to_id.get(folder["parent"])
             id = db["folders"].insert(folder, pk="id", replace=True).last_pk
@@ -128,11 +130,13 @@ def cli(db_path, stop_after, dump, schema):
 
         expected_count = stop_after
         if not expected_count:
+            click.echo("Counting notes…", err=True)
             expected_count = count_notes()
 
         with click.progressbar(
             length=expected_count, label="Exporting notes", show_eta=True, show_pos=True
         ) as bar:
+            click.echo("Exporting notes…", err=True)
             for note in extract_notes():
                 # Fix the folder
                 note["folder"] = folder_long_ids_to_id.get(note["folder"])
@@ -157,6 +161,14 @@ def count_notes():
     )
 
 
+def iter_process_lines(process):
+    if process.stdout is None:
+        return
+    for line in process.stdout:
+        yield line
+    process.wait()
+
+
 def extract_notes():
     split = secrets.token_hex(8)
     process = subprocess.Popen(
@@ -167,7 +179,7 @@ def extract_notes():
     # Read line by line
     note = {}
     body = []
-    for line in process.stdout:
+    for line in iter_process_lines(process):
         line = line.decode("mac_roman").strip()
         if line == f"{split}{split}":
             if note.get("id"):
@@ -194,7 +206,7 @@ def extract_folders():
     )
     folders = []
     folder = {}
-    for line in process.stdout:
+    for line in iter_process_lines(process):
         for key in ("long_id", "name", "parent"):
             if line.startswith(f"{key}: ".encode("utf8")):
                 folder[key] = line[len(f"{key}: ") :].decode("macroman").strip() or None
@@ -206,21 +218,37 @@ def extract_folders():
 
 
 def topological_sort(nodes):
+    nodes = list(nodes)
     children = {}
+    nodes_by_long_id = {}
     for node in nodes:
-        parent_id = node["parent"]
+        long_id = node.get("long_id")
+        if long_id is not None:
+            nodes_by_long_id[long_id] = node
+        parent_id = node.get("parent")
         if parent_id is not None:
             children.setdefault(parent_id, []).append(node)
 
+    visited = set()
+
     def traverse(node, result):
+        long_id = node.get("long_id")
+        if long_id in visited:
+            return
+        visited.add(long_id)
         result.append(node)
-        if node["long_id"] in children:
-            for child in children[node["long_id"]]:
+        if long_id in children:
+            for child in children[long_id]:
                 traverse(child, result)
 
     sorted_data = []
     for node in nodes:
-        if node["parent"] is None:
+        parent_id = node.get("parent")
+        if parent_id is None or parent_id not in nodes_by_long_id:
+            traverse(node, sorted_data)
+
+    for node in nodes:
+        if node.get("long_id") not in visited:
             traverse(node, sorted_data)
 
     return sorted_data

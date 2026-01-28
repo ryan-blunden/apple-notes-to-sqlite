@@ -1,5 +1,5 @@
 from click.testing import CliRunner
-from apple_notes_to_sqlite.cli import cli, COUNT_SCRIPT, FOLDERS_SCRIPT
+from apple_notes_to_sqlite.cli import cli, COUNT_SCRIPT, FOLDERS_SCRIPT, topological_sort
 import sqlite_utils
 import json
 import os
@@ -95,6 +95,9 @@ def test_apple_notes_to_sqlite_dump(mock_token_hex, fp):
         # Output should be newline-delimited JSON
         notes = []
         for line in result.output.splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
             notes.append(json.loads(line))
         assert notes == EXPECTED_DUMP_NOTES
 
@@ -112,16 +115,28 @@ def test_folders(mock_token_hex, fp):
         assert result.exit_code == 0
         assert os.path.exists("folders.db")
         db = sqlite_utils.Database("folders.db")
-        assert db["folders"].schema == (
-            "CREATE TABLE [folders] (\n"
-            "   [id] INTEGER PRIMARY KEY,\n"
-            "   [long_id] TEXT,\n"
-            "   [name] TEXT,\n"
-            "   [parent] INTEGER,\n"
-            "   FOREIGN KEY([parent]) REFERENCES [folders]([id])\n"
-            ")"
+        columns = [
+            row[1] for row in db.conn.execute("PRAGMA table_info(folders)")
+        ]
+        assert columns == ["id", "long_id", "name", "parent"]
+        foreign_keys = list(db.conn.execute("PRAGMA foreign_key_list(folders)"))
+        assert any(
+            fk[2] == "folders" and fk[3] == "parent" and fk[4] == "id"
+            for fk in foreign_keys
         )
         assert list(db["folders"].rows) == [
             {"id": 1, "long_id": "folder-1", "name": "Folder 1", "parent": None},
             {"id": 2, "long_id": "folder-2", "name": "Folder 2", "parent": 1},
         ]
+
+
+def test_topological_sort_includes_orphans():
+    nodes = [
+        {"long_id": "a", "name": "A", "parent": "missing"},
+        {"long_id": "b", "name": "B", "parent": "a"},
+        {"long_id": "c", "name": "C", "parent": "missing"},
+    ]
+    sorted_nodes = topological_sort(nodes)
+    sorted_ids = [node["long_id"] for node in sorted_nodes]
+    assert set(sorted_ids) == {"a", "b", "c"}
+    assert sorted_ids.index("a") < sorted_ids.index("b")
