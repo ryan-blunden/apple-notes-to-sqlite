@@ -1,6 +1,5 @@
 import click
 import json
-import os
 import re
 import secrets
 import sqlite3
@@ -58,30 +57,6 @@ tell application "Notes"
 end tell
 """.strip()
 
-EXTRACT_SCRIPT_SINCE = """
-tell application "Notes"
-   set cutoffDate to date "{since}"
-   repeat with eachNote in (every note whose modification date > cutoffDate)
-      set noteId to the id of eachNote
-      set noteTitle to the name of eachNote
-      set noteBody to the body of eachNote
-      set noteCreatedDate to the creation date of eachNote
-      set noteCreated to (noteCreatedDate as «class isot» as string)
-      set noteUpdatedDate to the modification date of eachNote
-      set noteUpdated to (noteUpdatedDate as «class isot» as string)
-      set noteContainer to container of eachNote
-      set noteFolderId to the id of noteContainer
-      log "{split}-id: " & noteId & "\n"
-      log "{split}-created: " & noteCreated & "\n"
-      log "{split}-updated: " & noteUpdated & "\n"
-      log "{split}-folder: " & noteFolderId & "\n"
-      log "{split}-title: " & noteTitle & "\n\n"
-      log noteBody & "\n"
-      log "{split}{split}" & "\n"
-   end repeat
-end tell
-""".strip()
-
 FOLDER_EXTRACT_SCRIPT = """
 tell application "Notes"
    set folderIds to {{{folder_ids}}}
@@ -109,33 +84,6 @@ tell application "Notes"
 end tell
 """.strip()
 
-FOLDER_EXTRACT_SCRIPT_SINCE = """
-tell application "Notes"
-   set cutoffDate to date "{since}"
-   set folderIds to {{{folder_ids}}}
-   repeat with folderId in folderIds
-      set targetFolder to folder id folderId
-      repeat with eachNote in (every note of targetFolder whose modification date > cutoffDate)
-         set noteId to the id of eachNote
-         set noteTitle to the name of eachNote
-         set noteBody to the body of eachNote
-         set noteCreatedDate to the creation date of eachNote
-         set noteCreated to (noteCreatedDate as «class isot» as string)
-         set noteUpdatedDate to the modification date of eachNote
-         set noteUpdated to (noteUpdatedDate as «class isot» as string)
-         set noteContainer to container of eachNote
-         set noteFolderId to the id of noteContainer
-         log "{split}-id: " & noteId & "\n"
-         log "{split}-created: " & noteCreated & "\n"
-         log "{split}-updated: " & noteUpdated & "\n"
-         log "{split}-folder: " & noteFolderId & "\n"
-         log "{split}-title: " & noteTitle & "\n\n"
-         log noteBody & "\n"
-         log "{split}{split}" & "\n"
-      end repeat
-   end repeat
-end tell
-""".strip()
 DEFAULT_NOTESTORE_PATH = Path(
     "~/Library/Group Containers/group.com.apple.notes/NoteStore.sqlite"
 ).expanduser()
@@ -152,29 +100,11 @@ DEFAULT_NOTESTORE_PATH = Path(
 @click.option("--dump", is_flag=True, help="Output notes to standard output")
 @click.option("--schema", is_flag=True, help="Create database schema and exit")
 @click.option(
-    "--sync",
-    is_flag=True,
-    help="Only update notes whose 'updated' timestamp has changed",
-)
-@click.option(
-    "--sync-delete-missing",
-    is_flag=True,
-    help="With --sync, delete notes missing from this run (scope aware of --folder)",
-)
-@click.option(
     "--folder",
     "folder_filter",
     help="Only export notes from this folder (by path, name, or long_id)",
 )
-def cli(
-    db_path,
-    stop_after,
-    dump,
-    schema,
-    sync,
-    sync_delete_missing,
-    folder_filter,
-):
+def cli(db_path, stop_after, dump, schema, folder_filter):
     """
     Export Apple Notes to SQLite
 
@@ -189,10 +119,6 @@ def cli(
         raise click.UsageError(
             "Please specify a path to a database file, or use --dump to see the output",
         )
-    if sync_delete_missing and not sync:
-        raise click.UsageError("--sync-delete-missing requires --sync")
-    if sync_delete_missing and stop_after:
-        raise click.UsageError("--sync-delete-missing cannot be used with --stop-after")
     # Use click progressbar
     i = 0
     allowed_note_long_ids = None
@@ -240,10 +166,6 @@ def cli(
                 break
     else:
         db = sqlite_utils.Database(db_path)
-        existing_updates = None
-        seen_note_ids = set() if sync_delete_missing else None
-        latest_updated = None
-        last_sync = None
         # Create schema
         folder_long_ids_to_id = {}
         if not db["folders"].exists():
@@ -274,23 +196,6 @@ def cli(
         if schema:
             # Our work is done
             return
-        if sync:
-            if not db["sync_state"].exists():
-                db["sync_state"].create({"key": str, "value": str}, pk="key")
-            try:
-                row = db["sync_state"].get("last_sync")
-            except Exception:
-                row = None
-            if row:
-                last_sync = row["value"]
-            if db["notes"].exists():
-                existing_updates = {
-                    row["id"]: row["updated"]
-                    for row in db.query("select id, updated from notes")
-                }
-        if sync_delete_missing:
-            # Deletion requires a full scan to avoid removing unchanged notes.
-            last_sync = None
 
         click.echo("Fetching folders from Notes…", err=True)
         folders = extract_folders()
@@ -347,28 +252,15 @@ def cli(
                         f"{get_coredata_base()}/ICFolder/p{pk}"
                         for pk in allowed_folder_pks
                     ]
-                    notes_iter = extract_notes_for_folders(
-                        folder_coredata_ids, since=last_sync
-                    )
+                    notes_iter = extract_notes_for_folders(folder_coredata_ids)
                 else:
-                    notes_iter = extract_notes(since=last_sync)
+                    notes_iter = extract_notes()
                 for note in notes_iter:
                     if (
                         allowed_note_long_ids is not None
                         and note.get("folder") not in allowed_note_long_ids
                     ):
                         continue
-                    if seen_note_ids is not None:
-                        seen_note_ids.add(note["id"])
-                    if existing_updates is not None:
-                        if existing_updates.get(note["id"]) == note.get("updated"):
-                            bar.update(1)
-                            i += 1
-                            if stop_after and i >= stop_after:
-                                break
-                            continue
-                    if latest_updated is None or note.get("updated") > latest_updated:
-                        latest_updated = note.get("updated")
                     # Fix the folder
                     note["folder"] = folder_long_ids_to_id.get(note["folder"])
                     db["notes"].insert(
@@ -386,11 +278,9 @@ def cli(
                     f"{get_coredata_base()}/ICFolder/p{pk}"
                     for pk in allowed_folder_pks
                 ]
-                notes_iter = extract_notes_for_folders(
-                    folder_coredata_ids, since=last_sync
-                )
+                notes_iter = extract_notes_for_folders(folder_coredata_ids)
             else:
-                notes_iter = extract_notes(since=last_sync)
+                notes_iter = extract_notes()
             with click.progressbar(
                 notes_iter,
                 label="Exporting notes",
@@ -403,16 +293,6 @@ def cli(
                         and note.get("folder") not in allowed_note_long_ids
                     ):
                         continue
-                    if seen_note_ids is not None:
-                        seen_note_ids.add(note["id"])
-                    if existing_updates is not None:
-                        if existing_updates.get(note["id"]) == note.get("updated"):
-                            i += 1
-                            if stop_after and i >= stop_after:
-                                break
-                            continue
-                    if latest_updated is None or note.get("updated") > latest_updated:
-                        latest_updated = note.get("updated")
                     # Fix the folder
                     note["folder"] = folder_long_ids_to_id.get(note["folder"])
                     db["notes"].insert(
@@ -423,33 +303,6 @@ def cli(
                     i += 1
                     if stop_after and i >= stop_after:
                         break
-
-        if sync_delete_missing:
-            if seen_note_ids is None:
-                return
-            if allowed_note_long_ids is not None:
-                allowed_folder_ids = [
-                    folder_long_ids_to_id.get(folder_id)
-                    for folder_id in allowed_note_long_ids
-                    if folder_long_ids_to_id.get(folder_id) is not None
-                ]
-                if allowed_folder_ids:
-                    placeholders = ", ".join("?" for _ in allowed_folder_ids)
-                    db.execute(
-                        f"delete from notes where folder in ({placeholders}) and id not in (select value from json_each(?))",
-                        tuple(allowed_folder_ids) + (json.dumps(sorted(seen_note_ids)),),
-                    )
-            else:
-                db.execute(
-                    "delete from notes where id not in (select value from json_each(?))",
-                    (json.dumps(sorted(seen_note_ids)),),
-                )
-        if sync and latest_updated and not stop_after:
-            db["sync_state"].insert(
-                {"key": "last_sync", "value": latest_updated},
-                pk="key",
-                replace=True,
-            )
 
 
 def count_notes():
@@ -462,15 +315,8 @@ def count_notes():
     )
 
 
-def should_use_notestore():
-    env = os.environ.get("APPLE_NOTES_TO_SQLITE_USE_NOTESTORE")
-    if env is not None and env.lower() in {"0", "false", "no"}:
-        return False
-    return DEFAULT_NOTESTORE_PATH.exists()
-
-
 def count_notes_for_folders(folder_pks):
-    if not folder_pks or not should_use_notestore():
+    if not folder_pks or not DEFAULT_NOTESTORE_PATH.exists():
         return None
     placeholders = ",".join("?" for _ in folder_pks)
     con = sqlite3.connect(str(DEFAULT_NOTESTORE_PATH))
@@ -492,15 +338,10 @@ def iter_process_lines(process):
     process.wait()
 
 
-def extract_notes(since=None):
+def extract_notes():
     split = secrets.token_hex(8)
-    if since:
-        since = since.replace("T", " ")
-        script = EXTRACT_SCRIPT_SINCE.format(split=split, since=since)
-    else:
-        script = EXTRACT_SCRIPT.format(split=split)
     process = subprocess.Popen(
-        ["osascript", "-e", script],
+        ["osascript", "-e", EXTRACT_SCRIPT.format(split=split)],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -541,22 +382,14 @@ def get_coredata_base():
     return match.group(1)
 
 
-def extract_notes_for_folders(folder_coredata_ids, since=None):
+def extract_notes_for_folders(folder_coredata_ids):
     if not folder_coredata_ids:
         return []
     split = secrets.token_hex(8)
     folder_ids_literal = ", ".join(
         f'"{folder_id}"' for folder_id in folder_coredata_ids
     )
-    if since:
-        since = since.replace("T", " ")
-        script = FOLDER_EXTRACT_SCRIPT_SINCE.format(
-            split=split, folder_ids=folder_ids_literal, since=since
-        )
-    else:
-        script = FOLDER_EXTRACT_SCRIPT.format(
-            split=split, folder_ids=folder_ids_literal
-        )
+    script = FOLDER_EXTRACT_SCRIPT.format(split=split, folder_ids=folder_ids_literal)
     process = subprocess.Popen(
         ["osascript", "-e", script],
         stdout=subprocess.PIPE,
@@ -584,7 +417,7 @@ def extract_notes_for_folders(folder_coredata_ids, since=None):
 
 
 def extract_folders():
-    if should_use_notestore():
+    if DEFAULT_NOTESTORE_PATH.exists():
         return extract_folders_from_notestore(DEFAULT_NOTESTORE_PATH)
     return extract_folders_from_osascript()
 

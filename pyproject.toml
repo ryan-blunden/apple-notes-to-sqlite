@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apple-notes-to-sqlite"
+version = "0.1"
+description = "Export Apple Notes to SQLite"
+readme = "README.md"
+requires-python = ">=3.7"
+license = { text = "Apache License, Version 2.0" }
+authors = [
+  { name = "Simon Willison" }
+]
+dependencies = [
+  "click",
+  "sqlite-utils",
+]
+
+[project.urls]
+Homepage = "https://github.com/dogsheep/apple-notes-to-sqlite"
+Issues = "https://github.com/dogsheep/apple-notes-to-sqlite/issues"
+CI = "https://github.com/dogsheep/apple-notes-to-sqlite/actions"
+Changelog = "https://github.com/dogsheep/apple-notes-to-sqlite/releases"
+
+[project.scripts]
+apple-notes-to-sqlite = "apple_notes_to_sqlite.cli:cli"
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-subprocess",
+  "cogapp",
+]
+
+[tool.setuptools]
+packages = ["apple_notes_to_sqlite"]
