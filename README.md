@@ -2,7 +2,7 @@
 
 Export Apple Notes to SQLite.
 
-This tool extracts notes and folders from the macOS Notes app using AppleScript and writes them to a SQLite database. It supports full exports, incremental sync, filtered exports, and optional delete-missing behavior.
+This tool extracts notes and folders from the macOS Notes app using AppleScript and writes them to a SQLite database. It defaults to incremental sync, and supports forced full exports, filtered exports, and optional delete-missing behavior.
 
 ## Requirements
 
@@ -46,10 +46,11 @@ apple-notes-to-sqlite notes.db --schema
 
 ## What It Writes
 
-Two tables are created (if missing):
+Three tables are created (if missing):
 
 - `folders`: `id`, `long_id`, `name`, `parent`
 - `notes`: `id`, `created`, `updated`, `folder`, `title`, `body`
+- `sync_state`: `key`, `value` (stores `last_sync`)
 
 `folder` in `notes` is a foreign key to `folders.id`.
 
@@ -59,8 +60,8 @@ Two tables are created (if missing):
 --stop-after INTEGER   Stop after this many notes
 --dump                 Output notes to standard output
 --schema               Create database schema and exit
---sync                 Only update notes whose 'updated' timestamp has changed
---sync-delete-missing  With --sync, delete notes missing from this run (scope aware of --folder)
+--full, --recreate     Force a full scan (disable incremental fetching for this run)
+--sync-delete-missing  Delete notes missing from this run (scope aware of --folder)
 --folder TEXT          Only export notes from this folder (by path, name, or long_id)
 --help                 Show this message and exit
 ```
@@ -83,17 +84,19 @@ Limits the export to a specific folder. You can pass:
 
 Notes in the selected folder and its descendants are included. The folder table includes the required ancestry so foreign keys can be maintained.
 
-### `--sync`
+### Default incremental sync
 
-Enables incremental sync behavior:
+Incremental sync is enabled by default:
 
 - Notes are still extracted from Notes, but DB updates are skipped for any note whose `updated` timestamp has not changed.
 - After a successful full sync, the tool records a `last_sync` timestamp in the database.
 - On subsequent runs, only notes modified after `last_sync` are fetched from Notes, which makes repeated runs much faster.
 
-### `--sync-delete-missing`
+### `--full` / `--recreate`
 
-Only valid with `--sync`.
+Forces a full scan for that run (disables incremental fetching). This is useful if you want to rebuild from source regardless of `last_sync`.
+
+### `--sync-delete-missing`
 
 Deletes notes from the target DB that were not seen in the current run.
 
@@ -105,9 +108,9 @@ Important behavior:
 
 ## Performance Notes
 
-- The first run of `--sync` is a full scan and can take a long time on large note sets.
-- After `last_sync` is recorded, subsequent `--sync` runs only fetch notes modified after that timestamp.
-- If a `--sync` run is interrupted before completion, `last_sync` is not updated. The next run will still perform a full scan.
+- The first run is a full scan and can take a long time on large note sets.
+- After `last_sync` is recorded, subsequent runs only fetch notes modified after that timestamp.
+- If a run is interrupted before completion, `last_sync` is not updated. The next run will still perform a full scan.
 
 ## Safety Notes
 
@@ -133,7 +136,7 @@ uv run pytest
 
 ## Incremental Sync Internals
 
-When `--sync` is enabled:
+By default:
 
 - The tool stores `last_sync` in a `sync_state` table.
 - On subsequent runs it fetches only notes with `modification date > last_sync`.
