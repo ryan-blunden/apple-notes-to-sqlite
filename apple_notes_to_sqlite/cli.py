@@ -153,13 +153,21 @@ DEFAULT_NOTESTORE_PATH = Path(
 @click.option("--schema", is_flag=True, help="Create database schema and exit")
 @click.option(
     "--sync",
+    default=True,
     is_flag=True,
-    help="Only update notes whose 'updated' timestamp has changed",
+    hidden=True,
 )
 @click.option(
     "--sync-delete-missing",
     is_flag=True,
-    help="With --sync, delete notes missing from this run (scope aware of --folder)",
+    help="Delete notes missing from this run (scope aware of --folder)",
+)
+@click.option(
+    "--full",
+    "--recreate",
+    "full",
+    is_flag=True,
+    help="Force a full scan (disable incremental fetching for this run)",
 )
 @click.option(
     "--folder",
@@ -173,6 +181,7 @@ def cli(
     schema,
     sync,
     sync_delete_missing,
+    full,
     folder_filter,
 ):
     """
@@ -189,10 +198,9 @@ def cli(
         raise click.UsageError(
             "Please specify a path to a database file, or use --dump to see the output",
         )
-    if sync_delete_missing and not sync:
-        raise click.UsageError("--sync-delete-missing requires --sync")
     if sync_delete_missing and stop_after:
         raise click.UsageError("--sync-delete-missing cannot be used with --stop-after")
+    incremental_sync = sync and not full
     # Use click progressbar
     i = 0
     allowed_note_long_ids = None
@@ -271,12 +279,12 @@ def cli(
                 pk="id",
             )
             db["notes"].add_foreign_key("folder", "folders", "id")
+        if not db["sync_state"].exists():
+            db["sync_state"].create({"key": str, "value": str}, pk="key")
         if schema:
             # Our work is done
             return
-        if sync:
-            if not db["sync_state"].exists():
-                db["sync_state"].create({"key": str, "value": str}, pk="key")
+        if incremental_sync:
             try:
                 row = db["sync_state"].get("last_sync")
             except Exception:
@@ -288,9 +296,11 @@ def cli(
                     row["id"]: row["updated"]
                     for row in db.query("select id, updated from notes")
                 }
-        if sync_delete_missing:
-            # Deletion requires a full scan to avoid removing unchanged notes.
+        if full or sync_delete_missing:
+            # Full runs and delete-missing runs disable incremental fetch.
             last_sync = None
+        if full:
+            existing_updates = None
 
         click.echo("Fetching folders from Notes…", err=True)
         folders = extract_folders()
@@ -444,7 +454,7 @@ def cli(
                     "delete from notes where id not in (select value from json_each(?))",
                     (json.dumps(sorted(seen_note_ids)),),
                 )
-        if sync and latest_updated and not stop_after:
+        if latest_updated and not stop_after:
             db["sync_state"].insert(
                 {"key": "last_sync", "value": latest_updated},
                 pk="key",

@@ -97,9 +97,10 @@ def test_apple_notes_to_sqlite(mock_token_hex, fp):
         assert os.path.exists("notes.db")
         db = sqlite_utils.Database("notes.db")
         # Check tables were created
-        assert set(db.table_names()) == {"notes", "folders"}
+        assert set(db.table_names()) == {"notes", "folders", "sync_state"}
         # Check that the notes were inserted
         assert list(db["notes"].rows) == EXPECTED_NOTES
+        assert db["sync_state"].get("last_sync")["value"] == "2023-03-08T15:36:41"
 
 
 @patch("secrets.token_hex")
@@ -158,6 +159,7 @@ def test_folders(mock_token_hex, fp):
         assert_cli_success(result)
         assert os.path.exists("folders.db")
         db = sqlite_utils.Database("folders.db")
+        assert db["sync_state"].get("last_sync")["value"] == "2023-03-08T15:36:41"
         columns = [
             row[1] for row in db.conn.execute("PRAGMA table_info(folders)")
         ]
@@ -211,3 +213,17 @@ def test_topological_sort_includes_orphans():
     sorted_ids = [node["long_id"] for node in sorted_nodes]
     assert set(sorted_ids) == {"a", "b", "c"}
     assert sorted_ids.index("a") < sorted_ids.index("b")
+
+
+@patch("secrets.token_hex")
+def test_recreate_alias_forces_full_scan(mock_token_hex, fp):
+    fp.register_subprocess(["osascript", "-e", COUNT_SCRIPT], stdout=b"2")
+    fp.register_subprocess(["osascript", "-e", FOLDERS_SCRIPT], stdout=FOLDER_OUTPUT)
+    fp.register_subprocess(["osascript", "-e", fp.any()], stdout=FAKE_OUTPUT)
+    mock_token_hex.return_value = "abcdefg"
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(cli, ["notes.db", "--recreate"])
+        assert_cli_success(result)
+        db = sqlite_utils.Database("notes.db")
+        assert list(db["notes"].rows) == EXPECTED_NOTES
